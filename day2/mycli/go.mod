@@ -1,4 +1,4 @@
-module github.com/myname/calc
+module mycli
 
 go 1.24.0
 

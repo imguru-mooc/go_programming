@@ -1,98 +1,68 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/myname/calc/internal/calculator"
-	"github.com/myname/calc/pkg/parser"
-	"path/filepath"
-	"time"
+	"github.com/spf13/cobra"
 )
 
-var Version = "dev"
+var (
+	Version = "dev"
+	verbose bool
+)
 
-func appendHistory(line string) error {
-	if os.Getenv("CALC_HISTORY") != "on" {
-		return nil
+var rootCmd = &cobra.Command{
+	Use:     "calc",
+	Short:   "간단한 계산기",
+	Long:    "사칙연산과 나머지 연산을 지원하는 CLI 계산기입니다.",
+	Version: Version,
+}
+
+func init() {
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "상세 출력")
+
+	rootCmd.AddCommand(makeOpCmd("add", "더하기", "+"))
+	rootCmd.AddCommand(makeOpCmd("sub", "빼기", "-"))
+	rootCmd.AddCommand(makeOpCmd("mul", "곱하기", "×"))
+	rootCmd.AddCommand(makeOpCmd("div", "나누기", "÷"))
+	rootCmd.AddCommand(makeOpCmd("mod", "나머지", "mod"))
+}
+
+func makeOpCmd(op, desc, sym string) *cobra.Command {
+	return &cobra.Command{
+		Use:   fmt.Sprintf("%s [a] [b]", op),
+		Short: desc,
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := strconv.ParseFloat(args[0], 64)
+			if err != nil {
+				return fmt.Errorf("a 파싱 실패: %w", err)
+			}
+			b, err := strconv.ParseFloat(args[1], 64)
+			if err != nil {
+				return fmt.Errorf("b 파싱 실패: %w", err)
+			}
+
+			if verbose {
+				fmt.Printf("[%s] %v %s %v 계산 중...\n", op, a, sym, b)
+			}
+
+			result, err := calculator.Calculate(op, a, b)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("%g %s %g = %g\n", a, sym, b, result)
+			return nil
+		},
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(home, ".calc-history")
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	_, err = fmt.Fprintf(f, "%s | %s\n", ts, line)
-	return err
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
-
-	// --version 처리
-	if os.Args[1] == "--version" || os.Args[1] == "-v" {
-		fmt.Printf("calc %s\n", Version)
-		return
-	}
-
-	args, err := parser.Parse(os.Args[1:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "에러:", err)
-		os.Exit(1)
-	}
-
-	result, err := calculator.Calculate(args.Op, args.A, args.B)
-	if err != nil {
-		if errors.Is(err, calculator.ErrDivByZero) {
-			fmt.Fprintln(os.Stderr, "❌ 0으로 나눌 수 없습니다")
-		} else {
-			fmt.Fprintln(os.Stderr, "에러:", err)
-		}
-		os.Exit(1)
-	}
-
-	fmt.Printf("%g %s %g = %g\n", args.A, symbol(args.Op), args.B, result)
-
-	line := fmt.Sprintf("%g %s %g = %g", args.A, symbol(args.Op), args.B, result)
-
-	if err := appendHistory(line); err != nil {
-		fmt.Fprintln(os.Stderr, "이력 저장 실패:", err)
-	}
-}
-
-func symbol(op string) string {
-	switch op {
-	case "add":
-		return "+"
-	case "sub":
-		return "-"
-	case "mul":
-		return "×"
-	case "div":
-		return "÷"
-	case "mod":
-		return "%"
-	}
-	return op
-}
-
-func usage() {
-	fmt.Println("사용법: calc <op> <a> <b>")
-	fmt.Println("  op: add | sub | mul | div")
-	fmt.Println("예시: calc add 3 5")
-	fmt.Println()
-	fmt.Println("옵션:")
-	fmt.Println("  -v, --version  버전 표시")
 }
