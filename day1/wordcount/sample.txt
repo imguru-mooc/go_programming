@@ -1,0 +1,2 @@
+go is a programming language go was created at google
+go is fast go is simple go is fun go go go
