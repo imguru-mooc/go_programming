@@ -14,6 +14,12 @@ func BenchmarkMul(b *testing.B) {
 	}
 }
 
+func BenchmarkCalculateAdd(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_, _ = Calculate("add", 10, 20)
+	}
+}
+
 func BenchmarkCalculate(b *testing.B) {
 	benchmarks := []struct {
 		name string

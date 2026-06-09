@@ -44,3 +44,32 @@ func TestCalculate_UnknownOp(t *testing.T) {
 		t.Error("에러가 발생해야 함")
 	}
 }
+
+func BenchmarkCalculate(b *testing.B) {
+	benchmarks := []struct {
+		name string
+		op   string
+		a, b float64
+	}{
+		{"add", "add", 1.5, 2.5},
+		{"mul", "mul", 12.34, 56.78},
+		{"div", "div", 100.0, 3.0},
+		{"mod", "mod", 100.0, 7.0},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = Calculate(bm.op, bm.a, bm.b)
+			}
+		})
+	}
+}
+
+// 단순 함수 직접 호출과 비교
+func BenchmarkDirectAdd(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = 1.5 + 2.5
+	}
+}

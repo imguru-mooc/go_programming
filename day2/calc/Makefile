@@ -19,6 +19,10 @@ build-all:
 test:
 	go test -v -race -cover ./...
 
+.PHONY: bench
+bench:
+	go test -bench=. -benchmem ./internal/calculator
+
 .PHONY: fmt
 fmt:
 	go fmt ./...
