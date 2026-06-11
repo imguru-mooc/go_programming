@@ -1,0 +1,40 @@
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"time"
+)
+
+func main() {
+	levels := []string{"INFO", "WARN", "ERROR"}
+
+	messages := []string{
+		"서버 시작",
+		"DB 연결 실패",
+		"느린 응답",
+		"인증 실패",
+		"정상 요청",
+		"메모리 부족",
+		"디스크 풀",
+		"백업 완료",
+		"네트워크 단절",
+	}
+
+	startTime := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 100000; i++ {
+		level := levels[rand.Intn(len(levels))]
+		message := messages[rand.Intn(len(messages))]
+
+		// 로그 시간이 조금씩 증가하도록 설정
+		logTime := startTime.Add(time.Duration(i*5) * time.Second)
+
+		fmt.Printf(
+			"%s [%s] %s\n",
+			logTime.Format(time.RFC3339),
+			level,
+			message,
+		)
+	}
+}
