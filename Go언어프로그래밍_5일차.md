@@ -13,7 +13,7 @@
 | 1교시 | 표준 라이브러리 I | `net/http` 클라이언트/서버 |
 | 2교시 | 표준 라이브러리 II | `encoding/json`, 데이터 직렬화 |
 | 3교시 | 테스트와 벤치마크 심화 | 테이블 드리븐, mock, 커버리지 |
-| 4교시 | 로깅과 디버깅 | `log/slog`, 디버깅 기법 |
+| 4교시 | 로깅과 디버깅 | `log/slog`, **Delve 디버깅 핸즈온** |
 | 5교시 | 프로파일링 | `pprof`, CPU/메모리/고루틴 분석 |
 | 6교시 | CGo | Go ↔ C 상호 호출 |
 | 7교시 | 종합 실습 I | REST API 서버 — 구조 설계 + 핸들러 |
@@ -819,15 +819,16 @@ func ExampleAdd() {
 
 C에는 없는 우아한 메커니즘입니다.
 
-## 3.11 🧪 실습 코드: `calc_test.go` 완전판
+## 3.11 🧪 실습 코드: `calc` 패키지 완전판
+
+> ⚠️ **점검 노트**: 함수 정의를 `calc_test.go`에 넣으면 3.2의 `calc.go`와 **중복 선언 컴파일 에러**(`Add redeclared in this block`)가 발생합니다. 함수는 `calc.go`에, 테스트는 `calc_test.go`에 분리합니다.
+
+`calc.go`:
 
 ```go
 package calc
 
-import (
-    "fmt"
-    "testing"
-)
+import "fmt"
 
 func Add(a, b int) int { return a + b }
 func Sub(a, b int) int { return a - b }
@@ -838,6 +839,17 @@ func Div(a, b int) (int, error) {
     }
     return a / b, nil
 }
+```
+
+`calc_test.go`:
+
+```go
+package calc
+
+import (
+    "fmt"
+    "testing"
+)
 
 // 표 기반 테스트
 func TestBasicOps(t *testing.T) {
@@ -883,6 +895,14 @@ func ExampleAdd() {
     // Output: 5
 }
 ```
+
+실행 (검증 결과: 전부 PASS):
+```bash
+go test -race -v ./calc
+go test -bench=. ./calc
+```
+
+> 💡 `t.Parallel()`을 테이블 드리븐과 함께 쓰는 위 코드는 **Go 1.22+ 기준**입니다. 1.21 이하에서는 루프 안에 `tc := tc`를 추가하세요(3.4 참고).
 
 ### ✅ 3교시 체크포인트
 
@@ -1068,9 +1088,318 @@ dlv debug ./cmd/myapp
 # (dlv) print someVar
 ```
 
-VS Code, GoLand 등 IDE에서 그래픽 디버깅도 지원합니다.
+VS Code, GoLand 등 IDE에서 그래픽 디버깅도 지원합니다. **바로 다음 4.7절에서 Delve를 처음부터 끝까지 따라하는 핸즈온 실습을 진행합니다.**
 
-## 4.7 🧪 실습 코드: `logging_demo.go`
+## 4.7 🔬 Go 디버깅 따라하기 — Delve 핸즈온
+
+`fmt.Printf` 디버깅만으로는 한계가 있습니다. C에서 GDB를 쓰듯, Go에서는 **Delve(dlv)**를 씁니다. 이 절은 처음부터 끝까지 그대로 따라할 수 있는 실습입니다.
+
+### 4.7.1 준비 — 설치와 디버그 대상 코드
+
+```bash
+# Delve 설치
+go install github.com/go-delve/delve/cmd/dlv@latest
+
+# PATH 확인 (~/go/bin이 PATH에 있어야 함)
+dlv version
+```
+
+실습용 버그 프로그램을 만듭니다. **10% 할인을 의도했는데 결제 금액이 0원이 나오는 버그**가 숨어 있습니다.
+
+```bash
+mkdir -p ~/go-class/day5/dbg && cd ~/go-class/day5/dbg
+go mod init dbg
+```
+
+`main.go`:
+
+```go
+package main
+
+import "fmt"
+
+type Item struct {
+    Name  string
+    Price int
+    Qty   int
+}
+
+func total(items []Item) int {
+    sum := 0
+    for _, it := range items {
+        sum += it.Price * it.Qty
+    }
+    return sum
+}
+
+func applyDiscount(sum int, rate float64) int {
+    // 버그: 의도는 10% 할인인데 rate를 잘못 사용
+    return sum - int(float64(sum)*rate*10)
+}
+
+func main() {
+    items := []Item{
+        {"키보드", 30000, 2},
+        {"마우스", 15000, 1},
+        {"모니터", 200000, 1},
+    }
+    sum := total(items)
+    final := applyDiscount(sum, 0.1)
+    fmt.Println("합계:", sum)
+    fmt.Println("결제 금액:", final)
+}
+```
+
+먼저 그냥 실행해서 증상을 확인합니다:
+
+```bash
+go run .
+# 합계: 275000
+# 결제 금액: 0        ← ❌ 10% 할인이면 247500이어야 하는데?
+```
+
+### 4.7.2 첫 디버깅 세션 — 중단점, 실행 제어, 변수 확인
+
+```bash
+dlv debug .
+```
+
+`dlv debug`는 최적화/인라이닝을 끄고(`-gcflags="all=-N -l"` 자동 적용) 빌드한 뒤 디버거 셸을 띄웁니다. 이제 GDB와 거의 같은 흐름으로 진행합니다:
+
+```
+(dlv) break main.applyDiscount        # ① 함수에 중단점
+Breakpoint 1 set at 0x... for main.applyDiscount() ./main.go:19
+
+(dlv) continue                        # ② 중단점까지 실행
+> main.applyDiscount() ./main.go:19 (hits goroutine(1):1 total:1)
+
+(dlv) args                            # ③ 함수 인자 확인
+sum = 275000
+rate = 0.1
+
+(dlv) next                            # ④ 한 줄 실행 (GDB의 n)
+(dlv) print int(float64(sum)*rate*10) # ⑤ 표현식 평가!
+275000                                # ← 할인액이 합계 전체와 같다 = 버그 원인 발견
+
+(dlv) print float64(sum)*rate
+27500                                 # ← 이게 의도한 10% 할인액. "*10"이 범인
+```
+
+| GDB | Delve | 의미 |
+|---|---|---|
+| `break` / `b` | `break` / `b` | 중단점 설정 |
+| `run` | `continue` / `c` | 실행/재개 |
+| `next` / `n` | `next` / `n` | 한 줄 실행 (함수 위로) |
+| `step` / `s` | `step` / `s` | 함수 안으로 진입 |
+| `finish` | `stepout` / `so` | 현재 함수 끝까지 |
+| `print` / `p` | `print` / `p` | 변수/표현식 출력 |
+| `info args` | `args` | 함수 인자 |
+| `info locals` | `locals` | 지역 변수 전체 |
+| `backtrace` / `bt` | `bt` | 호출 스택 |
+| `frame N` | `frame N` | 스택 프레임 이동 |
+| `list` | `list` / `ls` | 현재 위치 소스 |
+| `watch` | `watch` | 변수 감시점 |
+| - | `restart` / `r` | 프로세스 재시작 |
+
+버그를 고치고(`rate*10` → `rate`) 디버거 안에서 바로 재확인:
+
+```
+(dlv) restart                         # 코드 수정 후 rebuild + 재시작 (dlv debug 모드)
+(dlv) continue
+(dlv) args
+sum = 275000
+rate = 0.1
+(dlv) stepout                         # 함수 끝까지 실행하고 반환값 확인
+Values returned:
+    ~r0: 247500                       # ✅ 의도한 결과
+(dlv) quit
+```
+
+### 4.7.3 조건부 중단점 — "1000번째 반복에서만 멈춰줘"
+
+루프 안 버그를 잡을 때 매번 `continue`를 칠 수는 없습니다.
+
+```
+(dlv) break main.go:14                # total()의 루프 내부 줄 번호
+(dlv) condition 1 it.Price > 100000   # 중단점 1번에 조건 부여
+(dlv) continue
+> main.total() ./main.go:14
+(dlv) print it
+main.Item {Name: "모니터", Price: 200000, Qty: 1}   # 조건 맞는 순간만 정지
+```
+
+한 줄로도 가능합니다: `break main.go:14 if it.Qty > 1`
+
+### 4.7.4 고루틴 디버깅 — Delve의 진짜 가치
+
+C에서 pthread 디버깅의 악몽을 기억한다면, 이 부분이 Delve의 백미입니다.
+
+```
+(dlv) goroutines                      # 모든 고루틴 목록
+* Goroutine 1 - ... main.main
+  Goroutine 18 - ... main.worker (대기 중인 위치 표시)
+  ...
+
+(dlv) goroutines -with user           # 사용자 코드 고루틴만 필터
+(dlv) goroutine 18                    # 18번 고루틴으로 전환
+(dlv) bt                              # 그 고루틴의 스택 추적
+(dlv) goroutine 18 bt                 # 전환 없이 한 번에
+```
+
+**고루틴 누수 의심 시**: `goroutines` 출력에서 같은 함수·같은 줄에 멈춘 고루틴이 비정상적으로 많다면 그곳이 누수 지점입니다(5교시 pprof의 `goroutine?debug=2`와 같은 정보를 대화형으로 보는 셈).
+
+### 4.7.5 실패하는 테스트 디버깅 — `dlv test`
+
+테스트가 깨졌을 때 `Printf`를 심지 말고 디버거를 붙이세요.
+
+```bash
+cd ~/go-class/day5/userapi
+
+# 특정 테스트만 디버깅
+dlv test ./internal/user -- -test.run TestMemoryStore_CRUD
+```
+
+```
+(dlv) break user.(*MemoryStore).Update    # 메서드 중단점: 패키지.(*타입).메서드
+(dlv) continue
+(dlv) print u
+(dlv) print s.users                       # map 내용도 그대로 출력됨
+(dlv) locals
+```
+
+### 4.7.6 실행 중인 서버에 붙기 — `dlv attach`
+
+운영 중(혹은 다른 터미널에서 실행 중)인 프로세스를 그대로 디버깅합니다.
+
+```bash
+# 터미널 1: 7~8교시 userapi 서버 실행
+./bin/userapi
+
+# 터미널 2: PID 찾아서 attach
+pgrep userapi          # 예: 12345
+dlv attach 12345
+```
+
+```
+(dlv) break userapi/internal/httpserver.(*Server).createUser
+(dlv) continue
+```
+
+```bash
+# 터미널 3: 요청을 쏘면 터미널 2의 중단점에서 멈춤
+curl -X POST http://localhost:8080/users \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Debug","email":"debug@example.com"}'
+```
+
+```
+(dlv) print u                  # 디코딩된 요청 본문 확인
+(dlv) bt                       # net/http 내부부터 핸들러까지 전체 스택
+(dlv) continue                 # 요청 계속 처리
+(dlv) quit                     # ⚠️ attach 종료 시 "프로세스를 죽일까?" 물음 → n 선택
+```
+
+> ⚠️ **주의**: 중단점에 멈춘 동안 그 고루틴의 요청은 블록됩니다. 운영 트래픽에는 attach 대신 로깅/pprof를 우선하세요.
+
+### 4.7.7 디버그 빌드와 운영 빌드
+
+`dlv debug`/`dlv test`는 자동 처리하지만, 미리 빌드한 바이너리를 `dlv exec`로 디버깅할 때는 직접 플래그를 줘야 합니다:
+
+```bash
+# 디버깅용 빌드: 최적화(-N), 인라이닝(-l) 비활성화
+go build -gcflags="all=-N -l" -o bin/userapi-debug ./cmd/userapi
+
+dlv exec bin/userapi-debug
+```
+
+최적화된 바이너리를 디버깅하면 변수가 `optimized out`으로 보이거나 줄 번호가 어긋납니다 — C에서 `-O2` 빌드를 GDB로 볼 때와 같은 현상입니다. 반대로 운영 배포 바이너리는 보통 `-ldflags="-s -w"`로 디버그 심볼을 제거합니다(8교시 Makefile 참고). **그 바이너리는 Delve로 디버깅할 수 없으니** 디버깅용 빌드를 따로 두세요.
+
+### 4.7.8 VS Code에서 그래픽 디버깅
+
+Go 확장을 설치하면 내부적으로 Delve(DAP)를 사용합니다. `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "userapi 디버그",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/userapi"
+    },
+    {
+      "name": "현재 패키지 테스트 디버그",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/user"
+    },
+    {
+      "name": "실행 중 프로세스에 attach",
+      "type": "go",
+      "request": "attach",
+      "mode": "local",
+      "processId": 0
+    }
+  ]
+}
+```
+
+줄 번호 왼쪽 클릭으로 중단점, F5 시작, F10 next, F11 step — CLI에서 익힌 개념이 그대로 매핑됩니다. 원격 디버깅은 서버에서 `dlv dap --listen=:2345` 또는 `dlv exec --headless --listen=:2345 ./bin/app`을 띄우고 IDE에서 접속합니다.
+
+### 4.7.9 데이터 레이스 디버깅 — `-race`와 함께
+
+디버거로 잡기 가장 어려운 버그가 race입니다. Go는 전용 도구가 있습니다.
+
+`race_demo.go`:
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+)
+
+func main() {
+    counter := 0
+    var wg sync.WaitGroup
+    for i := 0; i < 1000; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            counter++ // ❌ race!
+        }()
+    }
+    wg.Wait()
+    fmt.Println("counter =", counter)
+}
+```
+
+```bash
+go run -race race_demo.go
+# ==================
+# WARNING: DATA RACE
+# Read at 0x00c0000140a8 by goroutine 8:
+#   main.main.func1()  race_demo.go:15 +0x...
+# Previous write at 0x00c0000140a8 by goroutine 7:
+#   ...
+# ==================
+# counter = 1000        ← 결과가 맞아 보여도 race는 race!
+```
+
+**디버깅 워크플로 정리**:
+
+1. 증상 재현 → `go run -race` / `go test -race` 먼저 (race 여부 확인)
+2. 로직 버그 → `dlv debug` + 중단점 + `print` 표현식 평가
+3. 특정 입력에서만 발생 → 조건부 중단점
+4. 동시성 흐름 문제 → `goroutines` / `goroutine N bt`
+5. 실행 중 프로세스 → `dlv attach` (운영은 신중히)
+6. 성능 문제 → 디버거가 아니라 5교시 **pprof**로
+
+## 4.8 🧪 실습 코드: `logging_demo.go`
 
 ```go
 package main
@@ -1148,7 +1477,10 @@ curl http://localhost:8080/
 - [ ] `slog`로 구조화 로깅을 작성할 수 있는가?
 - [ ] JSON 핸들러와 텍스트 핸들러를 구분해 쓸 수 있는가?
 - [ ] Context로 로거를 전달하는 패턴을 이해했는가?
-- [ ] Delve 디버거의 기본 명령을 알고 있는가?
+- [ ] Delve로 중단점을 걸고 `print`/`args`/`locals`로 변수를 확인할 수 있는가?
+- [ ] 조건부 중단점과 `goroutine N bt`를 활용할 수 있는가?
+- [ ] `dlv test`로 실패하는 테스트를, `dlv attach`로 실행 중 프로세스를 디버깅할 수 있는가?
+- [ ] 디버그 빌드(`-gcflags="all=-N -l"`)와 운영 빌드(`-ldflags="-s -w"`)의 차이를 아는가?
 
 ---
 
@@ -1407,12 +1739,16 @@ package main
 
 /*
 #include <stdio.h>
+#include <stdlib.h>   // C.free에 반드시 필요!
 
 void say_hello(const char *name) {
     printf("Hello from C, %s!\n", name);
+    fflush(stdout);   // ⚠️ 아래 "출력 유실 함정" 참고
 }
 */
 import "C"
+
+import "unsafe"
 
 func main() {
     name := C.CString("Go")
@@ -1420,6 +1756,10 @@ func main() {
     C.say_hello(name)
 }
 ```
+
+> ⚠️ **점검 노트 1**: `C.free`를 쓰려면 `#include <stdlib.h>`가 **반드시** 필요합니다. 빠뜨리면 `could not determine kind of name for C.free` 컴파일 에러. `unsafe.Pointer`를 쓰므로 `import "unsafe"`도 필요합니다.
+>
+> ⚠️ **점검 노트 2 — 출력 유실 함정 (실측 확인)**: C의 `printf`는 C 런타임의 stdio 버퍼를 씁니다. 터미널에서는 줄 단위로 즉시 출력되지만, **파이프/리다이렉트(`./demo | cat`, `./demo > log.txt`) 환경에서는 전체 버퍼링**되는데, Go 런타임이 종료할 때 C stdio 버퍼를 비우지 않아 **출력이 통째로 사라질 수 있습니다**. C 코드에서 `fflush(stdout)`을 호출하는 습관을 들이세요. CI 로그에서 "C 출력이 안 보여요"의 원인 1순위입니다.
 
 실행:
 ```bash
@@ -1543,11 +1883,16 @@ goBytes := C.GoBytes(unsafe.Pointer(cArr), C.int(length))
 
 ## 6.6 슬라이스 ↔ C 배열
 
+> ⚠️ **점검 노트**: `import "C"`는 그룹 import에 넣으면 안 됩니다(6.2 핵심 규칙 2). cgo 전문(preamble) 주석은 **단독 `import "C"` 줄 바로 위**에 있어야 인식됩니다.
+
 ```go
-import (
-    "C"
-    "unsafe"
-)
+/*
+#include <stddef.h>
+void process_bytes(const unsigned char *data, size_t len);
+*/
+import "C"
+
+import "unsafe"
 
 // Go 슬라이스 → C 배열로 전달
 data := []byte{1, 2, 3, 4, 5}
@@ -1565,19 +1910,16 @@ C.process_bytes(
 
 C 라이브러리가 콜백 함수 포인터를 받는 경우.
 
+> ⚠️ **점검 노트 (실측 확인)**: `//export`가 있는 Go 파일의 전문(preamble)에는 C 함수의 **선언만** 둘 수 있습니다. **정의(본문)를 넣으면 `multiple definition of 'run_with_callback'` 링크 에러**가 납니다 — cgo가 전문을 두 개의 생성 파일에 복사하기 때문입니다. 정의는 별도 `.c` 파일로 분리하세요.
+
+`main.go`:
+
 ```go
 package main
 
 /*
-#include <stdio.h>
-
-extern void goCallback(int);
-
-void run_with_callback(void) {
-    for (int i = 0; i < 3; i++) {
-        goCallback(i);
-    }
-}
+extern void goCallback(int);     // Go 함수 선언 (//export로 노출됨)
+void run_with_callback(void);    // C 함수는 "선언만"!
 */
 import "C"
 
@@ -1591,6 +1933,26 @@ func goCallback(n C.int) {
 func main() {
     C.run_with_callback()
 }
+```
+
+`callback.c` (정의는 여기에):
+
+```c
+#include "_cgo_export.h"   // cgo가 자동 생성하는 헤더 — goCallback 선언 포함
+
+void run_with_callback(void) {
+    for (int i = 0; i < 3; i++) {
+        goCallback(i);
+    }
+}
+```
+
+실행 (검증 결과):
+```bash
+go run .
+# Go에서 호출됨: 0
+# Go에서 호출됨: 1
+# Go에서 호출됨: 2
 ```
 
 **`//export 함수명`**으로 Go 함수를 C에 노출합니다.
@@ -1805,6 +2167,7 @@ func (u *User) Validate() error {
 package user
 
 import (
+    "sort"
     "sync"
     "time"
 )
@@ -1918,15 +2281,7 @@ func (s *MemoryStore) Delete(id int) error {
 }
 ```
 
-import 빠진 것 추가하세요:
-
-```go
-import (
-    "sort"
-    "sync"
-    "time"
-)
-```
+> ✅ **점검 노트**: `List`에서 `sort.Slice`를 쓰므로 import에 `"sort"`가 반드시 필요합니다(위 코드에 반영됨). 누락 시 `undefined: sort` 컴파일 에러.
 
 ## 7.5 Step 4 — 저장소 테스트
 
@@ -1937,6 +2292,7 @@ package user
 
 import (
     "errors"
+    "fmt"
     "testing"
 )
 
@@ -2016,7 +2372,9 @@ func TestMemoryStore_Concurrent(t *testing.T) {
 }
 ```
 
-테스트 실행:
+> ✅ **점검 노트**: `TestMemoryStore_Concurrent`에서 `fmt.Sprintf`를 쓰므로 `"fmt"` import가 필요합니다(위 코드에 반영됨).
+
+테스트 실행 (검증 결과: `ok userapi/internal/user`):
 ```bash
 go test -race ./internal/user
 ```
@@ -2340,6 +2698,7 @@ package httpserver
 import (
     "bytes"
     "encoding/json"
+    "fmt"
     "net/http"
     "net/http/httptest"
     "strings"
@@ -2443,13 +2802,17 @@ func TestUserLifecycle(t *testing.T) {
 }
 
 // 벤치마크 - 생성 throughput
+// ⚠️ 점검 노트: 같은 이메일을 반복하면 이메일 중복 체크에 걸려
+// 두 번째 반복부터 409 Conflict 경로만 측정하게 됨 (실측 확인).
+// 반복마다 고유 이메일을 만들어야 "생성" 성능을 측정할 수 있다.
 func BenchmarkCreateUser(b *testing.B) {
     srv := newTestServer()
     handler := srv.Routes()
 
     b.ResetTimer()
     for i := 0; i < b.N; i++ {
-        body := bytes.NewReader([]byte(`{"name":"X","email":"x@x.com"}`))
+        payload := fmt.Sprintf(`{"name":"X","email":"x%d@x.com"}`, i)
+        body := bytes.NewReader([]byte(payload))
         req := httptest.NewRequest("POST", "/users", body)
         w := httptest.NewRecorder()
         handler.ServeHTTP(w, req)
